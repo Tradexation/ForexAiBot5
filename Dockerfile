@@ -15,4 +15,5 @@ COPY . /app
 
 # The default command to run the application using Gunicorn
 # This loads the Flask app 'app' from the file 'main.py'
-CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "main:app"]
+
+CMD gunicorn main:app --bind 0.0.0.0:$PORT
