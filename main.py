@@ -1,4 +1,4 @@
-# main.py - Forex Edition: The Final Structured Code
+# main.py - Forex Edition: The Final, Corrected Structure
 
 import os
 import ccxt
@@ -60,12 +60,15 @@ ML_MODEL = None
 SCALER = None
 
 
-# ========== 1. ALL TECHNICAL ANALYSIS AND ML FUNCTIONS (MUST BE FIRST) ==========
+# =========================================================================
+# === SECTION 1: ALL FUNCTION DEFINITIONS (MUST BE HERE, BEFORE ANY APP/THREAD START) ===
+# =========================================================================
 
+# 1. ML TRAINING FUNCTION
 def train_prediction_model(df):
     """Trains a Logistic Regression model and returns the model and scaler."""
     global SCALER
-    # ... (ML training logic remains unchanged) ...
+    
     if len(df) < 500:
         print("⚠️ Not enough data (need 500+ rows) for robust ML training. Skipping.")
         return None, None
@@ -92,9 +95,9 @@ def train_prediction_model(df):
     return model, SCALER
 
 
+# 2. CPR CALCULATION FUNCTION
 def calculate_cpr_levels(df_daily):
     """Calculates Daily Pivot Points (PP, TC, BC, R/S levels) from previous day's data."""
-    # ... (CPR calculation logic remains unchanged) ...
     if df_daily.empty or len(df_daily) < 2:
         return None
 
@@ -116,10 +119,12 @@ def calculate_cpr_levels(df_daily):
             'R2': R2, 'S2': S2, 'R3': R3, 'S3': S3}
 
 
+# 3. DATA FETCHING FUNCTION
 def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     """Fetches main chart data, prepares for analysis, and calculates SMAs."""
-    # ... (Data fetching/cleaning logic remains unchanged) ...
+    
     try:
+        # Uses the normalized symbol ID loaded from exchange.markets
         fx_symbol_id = exchange.markets[symbol]['id']
     except KeyError:
         print(f"Error: Symbol {symbol} not found in exchange market list. Check symbol format or exchange support.")
@@ -147,9 +152,10 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     return df, cpr_levels
 
 
+# 4. TREND AND SIGNAL FUNCTION
 def get_trend_and_signal(df, cpr_levels):
     """Determines trend via SMA crossover and incorporates ML prediction."""
-    # ... (Prediction and signal logic remains unchanged) ...
+    
     latest = df.iloc[-1]
     current_price = latest['close']
     fast_sma = latest['fast_sma']
@@ -162,7 +168,7 @@ def get_trend_and_signal(df, cpr_levels):
             is_fast_over_slow = 1 if fast_sma > slow_sma else 0
             is_close_over_fast = 1 if current_price > fast_sma else 0
             
-            # --- CRITICAL ROBUSTNESS FIX ---
+            # --- CRITICAL ROBUSTNESS FIX for Volatility ---
             close_prices_recent = df['close'].iloc[-20:] 
             if len(close_prices_recent) < 20:
                  current_volatility = 0.0
@@ -194,13 +200,14 @@ def get_trend_and_signal(df, cpr_levels):
             print(f"❌ ML PREDICTION FAILED (Runtime Error): {e}")
             ml_prediction = "NEUTRAL (ML Error)"
             
-    # --- Final Signal Generation (Trend, Proximity, Final Signal) ---
+    # --- Final Signal Generation ---
     trend = "Neutral"
     if fast_sma > slow_sma: trend = "Uptrend"; trend_emoji = "🟢"
     elif fast_sma < slow_sma: trend = "Downtrend"; trend_emoji = "🔴"
     else: trend_emoji = "🟡"
 
     pp = cpr_levels.get('PP', 'N/A')
+    
     proximity_msg = ""
     if pp != 'N/A':
         distance_to_pp = current_price - pp
@@ -223,37 +230,7 @@ def get_trend_and_signal(df, cpr_levels):
     return trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction
 
 
-# ========== 2. FLASK WEB SERVER & STATUS TRACKING (App object is defined here) ==========
-app = Flask(__name__) 
-
-bot_stats = {
-    "status": "initializing",
-    "total_analyses": 0,
-    "last_analysis": None,
-    "monitored_assets": SYMBOLS,
-    "uptime_start": datetime.now().isoformat()
-}
-
-@app.route('/')
-def home():
-    return render_template_string("<h1>Forex Bot Status Page</h1>" + 
-                                 f"<p>Status: {bot_stats['status']}</p>" + 
-                                 f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
-                                 f"<p>Last Analysis: {bot_stats['last_analysis'] or 'N/A'}</p>" +
-                                 f"<p>Exchange: {EXCHANGE_ID.upper()}</p>")
-
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
-
-@app.route('/status')
-def status():
-    # If the thread hasn't started yet, the error message from the crash will be in bot_stats['status']
-    return jsonify(bot_stats), 200
-
-
-# ========== 3. ASYNC SCHEDULER FUNCTIONS (These call the analysis functions above) ==========
-
+# 5. ASYNC SCHEDULER FUNCTIONS
 async def generate_and_send_signal(symbol):
     """Orchestrates data, analysis, and messaging."""
     
@@ -261,7 +238,7 @@ async def generate_and_send_signal(symbol):
         df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
         
         if df.empty or cpr_levels is None:
-            message = f"🚨 Data Fetch/Processing Error for {symbol}."
+            message = f"🚨 Data Fetch/Processing Error for {symbol}. Could not generate signal (Insufficient clean data)."
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
             return
 
@@ -317,7 +294,6 @@ async def generate_and_send_signal(symbol):
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        # Set status for the web page
         bot_stats['status'] = f"Fatal Error in Analysis Thread: {str(e)[:40]}..."
         print(f"❌ Error generating signal for {symbol}: {e}")
         
@@ -376,12 +352,46 @@ async def start_scheduler_loop():
         await asyncio.sleep(60)
 
 
-# ========== 4. CRITICAL STARTUP THREAD (This runs last) ==========
-
+# 6. CRITICAL STARTUP THREAD FUNCTION
 def start_asyncio_thread():
     """Target function for the background thread."""
     # Ensure this runs the scheduler loop
     asyncio.run(start_scheduler_loop())
+
+
+# =========================================================================
+# === SECTION 2: FLASK APP AND EXECUTABLE LOGIC (MUST BE AFTER ALL FUNCTIONS) ===
+# =========================================================================
+
+# 1. FLASK WEB SERVER & STATUS TRACKING (App object is defined here)
+app = Flask(__name__) 
+
+bot_stats = {
+    "status": "initializing",
+    "total_analyses": 0,
+    "last_analysis": None,
+    "monitored_assets": SYMBOLS,
+    "uptime_start": datetime.now().isoformat()
+}
+
+@app.route('/')
+def home():
+    return render_template_string("<h1>Forex Bot Status Page</h1>" + 
+                                 f"<p>Status: {bot_stats['status']}</p>" + 
+                                 f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
+                                 f"<p>Last Analysis: {bot_stats['last_analysis'] or 'N/A'}</p>" +
+                                 f"<p>Exchange: {EXCHANGE_ID.upper()}</p>")
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
+
+@app.route('/status')
+def status():
+    return jsonify(bot_stats), 200
+
+
+# 2. CRITICAL STARTUP CODE (Thread Start)
 
 # This thread starts immediately when Gunicorn loads the 'app' instance
 scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
