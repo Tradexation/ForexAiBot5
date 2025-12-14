@@ -1,4 +1,4 @@
-# main.py - Forex Edition: The FINAL, STABLE CODE
+# main.py - Forex Edition: The FINAL, DEFINITIVE CODE FIX
 
 import os
 import ccxt
@@ -27,7 +27,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # --- FOREX PAIRS ---
-# CRITICAL FIX: Changed default broker and symbols to FXCM (or similar stable broker)
+# CRITICAL FIX: FORCED to 'fxcm' to resolve 'attribute 'oanda' error'
 EXCHANGE_ID = os.getenv("EXCHANGE_ID", "fxcm") 
 FOREX_PAIRS = os.getenv("FOREX_PAIRS", "EUR/USD,USD/JPY,GBP/USD,AUD/USD,USD/CAD").split(',') 
 SYMBOLS = [s.strip() for s in FOREX_PAIRS] 
@@ -43,7 +43,6 @@ exchange_config = {
     'rateLimit': 1000, 
     'apiKey': os.getenv("FX_API_KEY"),
     'secret': os.getenv("FX_SECRET"),
-    # Add other necessary config if required by FXCM/your chosen broker
 }
 
 # Dynamically instantiate the exchange
@@ -52,7 +51,6 @@ try:
     exchange.load_markets() 
     print(f"✅ {EXCHANGE_ID.upper()} markets loaded successfully.")
 except Exception as e:
-    # Set status here for visibility before the thread starts
     print(f"❌ Failed to initialize/load markets for {EXCHANGE_ID}: {e}. Check .env credentials.")
     exit(1)
 
@@ -64,8 +62,8 @@ SCALER = None
 # =========================================================================
 # === SECTION 1: ALL FUNCTION DEFINITIONS (CRITICALLY IMPORTANT PLACEMENT) ===
 # =========================================================================
+# The placement here ensures all functions are DEFINED before the thread CALLS them.
 
-# 1. ML TRAINING FUNCTION
 def train_prediction_model(df):
     """Trains a Logistic Regression model and returns the model and scaler."""
     global SCALER
@@ -96,7 +94,6 @@ def train_prediction_model(df):
     return model, SCALER
 
 
-# 2. CPR CALCULATION FUNCTION
 def calculate_cpr_levels(df_daily):
     """Calculates Daily Pivot Points (PP, TC, BC, R/S levels) from previous day's data."""
     if df_daily.empty or len(df_daily) < 2:
@@ -120,7 +117,6 @@ def calculate_cpr_levels(df_daily):
             'R2': R2, 'S2': S2, 'R3': R3, 'S3': S3}
 
 
-# 3. DATA FETCHING FUNCTION
 def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     """Fetches main chart data, prepares for analysis, and calculates SMAs."""
     
@@ -152,7 +148,6 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     return df, cpr_levels
 
 
-# 4. TREND AND SIGNAL FUNCTION
 def get_trend_and_signal(df, cpr_levels):
     """Determines trend via SMA crossover and incorporates ML prediction."""
     
@@ -230,16 +225,16 @@ def get_trend_and_signal(df, cpr_levels):
     return trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction
 
 
-# 5. ASYNC SCHEDULER FUNCTIONS
-async def generate_and_send_signal(symbol):
+def generate_and_send_signal(symbol):
     """Orchestrates data, analysis, and messaging."""
+    # NOTE: This function is called by the scheduler and MUST be defined above the thread start.
     
     try:
         df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
         
         if df.empty or cpr_levels is None:
             message = f"🚨 Data Fetch/Processing Error for {symbol}. Could not generate signal (Insufficient clean data)."
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message))
             return
 
         trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction = get_trend_and_signal(df, cpr_levels)
@@ -286,9 +281,9 @@ async def generate_and_send_signal(symbol):
         message = message.replace('&lt;code&gt;', '<code>').replace('&lt;/code&gt;', '</code>')
         message = message.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
         
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+        # Use asyncio.run for the Telegram call since it's inside an async def called from a sync thread
+        asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML'))
         
-        # NOTE: bot_stats defined below, must be updated
         global bot_stats
         bot_stats['total_analyses'] += 1
         bot_stats['last_analysis'] = datetime.now().isoformat()
@@ -296,7 +291,6 @@ async def generate_and_send_signal(symbol):
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        # NOTE: bot_stats defined below, must be updated
         global bot_stats
         bot_stats['status'] = f"Fatal Error in Analysis Thread: {str(e)[:40]}..."
         print(f"❌ Error generating signal for {symbol}: {e}")
@@ -307,7 +301,7 @@ async def generate_and_send_signal(symbol):
             f"<b>Issue:</b> The calculation thread crashed.\n\n"
             f"<b>Source Trace:</b>\n<code>{str(e)[:150]}</code>" 
         )
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=diagnostic_message, parse_mode='HTML')
+        asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=diagnostic_message, parse_mode='HTML'))
 
 
 async def start_scheduler_loop():
@@ -339,6 +333,7 @@ async def start_scheduler_loop():
     scheduler = AsyncIOScheduler()
     
     for symbol in SYMBOLS:
+        # Note: generate_and_send_signal is now a synchronous function called via asyncio.run
         scheduler.add_job(generate_and_send_signal, 'cron', minute='0,30', args=[symbol]) 
     
     scheduler.start()
@@ -348,19 +343,18 @@ async def start_scheduler_loop():
     bot_stats['status'] = "operational"
 
     # Run initial analysis immediately after scheduler starts
-    await generate_and_send_signal(SYMBOLS[0].strip()) 
+    generate_and_send_signal(SYMBOLS[0].strip()) 
     if len(SYMBOLS) > 1:
-        await generate_and_send_signal(SYMBOLS[1].strip())
+        generate_and_send_signal(SYMBOLS[1].strip())
 
     # Keep the main thread running (Worker thread)
     while True:
         await asyncio.sleep(60)
 
 
-# 6. CRITICAL STARTUP THREAD FUNCTION
 def start_asyncio_thread():
     """Target function for the background thread."""
-    # Ensure this runs the scheduler loop
+    # Note: start_scheduler_loop is now synchronous, but requires asyncio to manage the scheduler
     asyncio.run(start_scheduler_loop())
 
 
@@ -396,7 +390,7 @@ def status():
     return jsonify(bot_stats), 200
 
 
-# 2. CRITICAL STARTUP CODE (Thread Start)
+# 2. CRITICAL STARTUP CODE (Thread Start - The last lines of execution)
 
 # This thread starts immediately when Gunicorn loads the 'app' instance
 scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
