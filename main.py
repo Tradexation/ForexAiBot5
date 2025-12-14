@@ -1,4 +1,4 @@
-# main.py - Forex Edition: The FINAL, GUARANTEED STABLE CODE
+# main.py - The FINAL, STABLE EXECUTION MODEL (Forex Edition)
 
 import os
 import ccxt
@@ -32,21 +32,20 @@ TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 DAILY_TIMEFRAME = '1d' 
 ANALYSIS_INTERVAL = 30 
 
-# Global objects initialized later
+# Global objects initialized later (CRITICAL for Gunicorn stability)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-exchange = None # CRITICAL: Exchange is initialized in a function
+exchange = None 
 ML_MODEL = None
 SCALER = None
+SCHEDULER_ACTIVE = False # New flag to track status
 
 
 # =========================================================================
-# === SECTION 1: ALL FUNCTION DEFINITIONS (CRITICALLY IMPORTANT PLACEMENT) ===
+# === SECTION 1: ALL FUNCTION DEFINITIONS (DEFINED BEFORE APP OBJECT) ===
 # =========================================================================
 
 def train_prediction_model(df):
-    # ... (ML training logic remains unchanged) ...
     global SCALER
-    # ... (rest of function) ...
     if len(df) < 500:
         print("⚠️ Not enough data (need 500+ rows) for robust ML training. Skipping.")
         return None, None
@@ -55,19 +54,15 @@ def train_prediction_model(df):
     df['close_over_fast'] = np.where(df['close'] > df['fast_sma'], 1, 0)
     df['volatility'] = df['close'].pct_change().rolling(20).std().fillna(0) 
     df = df.dropna()
-    X = df[['fast_over_slow', 'close_over_fast', 'volatility']]
-    y = df['target']
+    X = df[['fast_over_slow', 'close_over_fast', 'volatility']]; y = df['target']
     X_train = X.iloc[:-int(len(X) * 0.1)]; y_train = y.iloc[:-int(len(y) * 0.1)]
-    SCALER = StandardScaler()
-    X_train_scaled = SCALER.fit_transform(X_train)
-    model = LogisticRegression(solver='liblinear')
-    model.fit(X_train_scaled, y_train)
+    SCALER = StandardScaler(); X_train_scaled = SCALER.fit_transform(X_train)
+    model = LogisticRegression(solver='liblinear'); model.fit(X_train_scaled, y_train)
     print(f"✅ ML Model trained successfully. Accuracy: {model.score(X_train_scaled, y_train):.2f}")
     return model, SCALER
 
 
 def calculate_cpr_levels(df_daily):
-    # ... (CPR calculation logic remains unchanged) ...
     if df_daily.empty or len(df_daily) < 2: return None
     prev_day = df_daily.iloc[-2]; H, L, C = prev_day['high'], prev_day['low'], prev_day['close']
     PP = (H + L + C) / 3.0; BC = (H + L) / 2.0; TC = PP - BC + PP
@@ -77,7 +72,6 @@ def calculate_cpr_levels(df_daily):
 
 def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     """Fetches main chart data, prepares for analysis, and calculates SMAs."""
-    # CRITICAL: Ensures the global exchange object is used.
     global exchange 
     if exchange is None: raise Exception("Exchange not initialized.") 
     
@@ -88,8 +82,7 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
         return pd.DataFrame(), None
 
     ohlcv = exchange.fetch_ohlcv(fx_symbol_id, timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True); df = df.dropna()
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True); df = df.dropna()
     df['fast_sma'] = df['close'].rolling(window=9).mean(); df['slow_sma'] = df['close'].rolling(window=20).mean()
     df = df.dropna(); 
     if len(df) < 20: return pd.DataFrame(), None
@@ -101,7 +94,8 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
 
 
 def get_trend_and_signal(df, cpr_levels):
-    # ... (Signal generation logic remains unchanged) ...
+    """Determines trend via SMA crossover and incorporates ML prediction."""
+    
     latest = df.iloc[-1]; current_price = latest['close']; fast_sma = latest['fast_sma']; slow_sma = latest['slow_sma']
     ml_prediction = "NEUTRAL (No Model)"
     
@@ -152,21 +146,18 @@ def generate_and_send_signal(symbol):
         df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
         
         if df is None or df.empty or cpr_levels is None:
-            message = f"🚨 Data Fetch/Processing Error for {symbol}."
+            message = f"🚨 Data Fetch/Processing Error for {symbol} (Insufficient clean data)."
             asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message))
             return
 
+        # ... (rest of signal generation and message formatting) ...
         trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction = get_trend_and_signal(df, cpr_levels)
-        current_price = df.iloc[-1]['close']
-        price_format = ".5f" if current_price < 10 else ".4f"
-        
+        current_price = df.iloc[-1]['close']; price_format = ".5f" if current_price < 10 else ".4f"
         cpr_text = (
             f"<b>Daily CPR Levels:</b>\n"
             f"  - <b>PP (Pivot Point):</b> <code>{cpr_levels['PP']:{price_format}}</code>\n"
             f"  - <b>R1/S1:</b> <code>{cpr_levels['R1']:{price_format}}</code> / <code>{cpr_levels['S1']:{price_format}}</code>\n"
-            f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:{price_format}}</code> / <code>{cpr_levels['S2']:{price_format}}</code>\n"
-        )
-        
+            f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:{price_format}}</code> / <code>{cpr_levels['S2']:{price_format}}</code>\n")
         message = (
             f"╔════════════════════════════════╗\n"
             f"  🧠 <b>FOREX AI INTELLIGENCE REPORT</b>\n"
@@ -183,19 +174,16 @@ def generate_and_send_signal(symbol):
             f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n\n"
             f"{cpr_text}\n"
             f"----------------------------------------\n"
-            f"<i>Exchange: {EXCHANGE_ID.upper()} | Disclaimer: For educational use only.</i>"
-        )
+            f"<i>Exchange: {EXCHANGE_ID.upper()} | Disclaimer: For educational use only.</i>")
 
         message = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        message = message.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-        message = message.replace('&lt;code&gt;', '<code>').replace('&lt;/code&gt;', '</code>')
+        message = message.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>'); message = message.replace('&lt;code&gt;', '<code>').replace('&lt;/code&gt;', '</code>')
         message = message.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
         
         asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML'))
         
         global bot_stats
-        bot_stats['total_analyses'] += 1
-        bot_stats['last_analysis'] = datetime.now().isoformat()
+        bot_stats['total_analyses'] += 1; bot_stats['last_analysis'] = datetime.now().isoformat()
         bot_stats['status'] = "operational"
 
     except Exception as e:
@@ -214,22 +202,19 @@ def generate_and_send_signal(symbol):
 
 
 def start_scheduler_loop():
-    """Sets up the scheduler and keeps the asyncio loop running (Synchronous)."""
+    """Sets up the scheduler and runs the asyncio loop (Synchronous function)."""
+    
+    global ML_MODEL; global SCALER
     
     # --- ML Training before starting the loop ---
-    global ML_MODEL
-    global SCALER
-
     print("\n⏳ Preparing and training Machine Learning Model...")
     try:
-        # CRITICAL FIX: Ensure exchange is available for fetch
         global exchange 
         if exchange is None: raise Exception("Exchange not initialized during ML training.")
         
         ohlcv_train = exchange.fetch_ohlcv(exchange.markets[SYMBOLS[0]]['id'], TIMEFRAME, limit=600)
         df_train = pd.DataFrame(ohlcv_train, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_train['close'] = pd.to_numeric(df_train['close'])
-        
         df_train['fast_sma'] = df_train['close'].rolling(window=9).mean()
         df_train['slow_sma'] = df_train['close'].rolling(window=20).mean()
         df_train = df_train.dropna()
@@ -238,13 +223,11 @@ def start_scheduler_loop():
         
     except Exception as e:
         print(f"❌ ML Model Training Failed: {e}")
-        ML_MODEL = None
-        SCALER = None
+        ML_MODEL = None; SCALER = None
 
 
     # --- Start the scheduler loop ---
     scheduler = AsyncIOScheduler()
-    
     for symbol in SYMBOLS:
         scheduler.add_job(generate_and_send_signal, 'cron', minute='0,30', args=[symbol]) 
     
@@ -258,7 +241,7 @@ def start_scheduler_loop():
     generate_and_send_signal(SYMBOLS[0].strip()) 
     if len(SYMBOLS) > 1: generate_and_send_signal(SYMBOLS[1].strip())
 
-    # The loop must use asyncio.sleep since it manages the AsyncIOScheduler
+    # The loop must use asyncio.run_forever since it manages the AsyncIOScheduler
     asyncio.get_event_loop().run_forever()
 
 
@@ -266,7 +249,8 @@ def start_asyncio_thread():
     """Target function for the background thread."""
     # This runs the synchronous scheduler loop manager
     try:
-        asyncio.run(start_scheduler_loop())
+        # Note: start_scheduler_loop is now synchronous, but requires asyncio to manage the scheduler
+        start_scheduler_loop() 
     except Exception as e:
         print(f"FATAL SCHEDULER THREAD CRASH: {e}")
         global bot_stats
@@ -274,10 +258,13 @@ def start_asyncio_thread():
 
 
 def init_exchange_and_ml():
-    """Initializes the exchange and loads markets immediately after Flask starts."""
+    """Initializes the exchange and loads markets, called only once by the Flask route."""
     global exchange
     global ML_MODEL
     global SCALER
+    global SCHEDULER_ACTIVE
+    
+    if SCHEDULER_ACTIVE: return True # Already initialized
 
     exchange_config = {
         'enableRateLimit': True,
@@ -287,6 +274,7 @@ def init_exchange_and_ml():
     }
     
     try:
+        # 1. Exchange Initialization (Addressing the 'oanda' error)
         exchange = getattr(ccxt, EXCHANGE_ID)(exchange_config)
         exchange.load_markets() 
         print(f"✅ {EXCHANGE_ID.upper()} markets loaded successfully.")
@@ -296,17 +284,27 @@ def init_exchange_and_ml():
         bot_stats['status'] = f"Exchange Init Failed: {str(e)[:40]}"
         return False
     
+    # 2. Start the Scheduler Thread
+    scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
+    scheduler_thread.start()
+    
+    SCHEDULER_ACTIVE = True
+    global bot_stats
+    bot_stats['status'] = "operational"
+    print("✅ Scheduler thread initialized and running.")
     return True
+
 
 # =========================================================================
 # === SECTION 2: FLASK APP AND EXECUTABLE LOGIC (FINAL EXECUTABLE BLOCK) ===
 # =========================================================================
 
 # 1. FLASK WEB SERVER & STATUS TRACKING (App object is defined here)
+# Gunicorn can now load this instantly without crashing on a thread start.
 app = Flask(__name__) 
 
 bot_stats = {
-    "status": "initializing",
+    "status": "Awaiting Initialization (Hit /init-bot)",
     "total_analyses": 0,
     "last_analysis": None,
     "monitored_assets": SYMBOLS,
@@ -323,19 +321,24 @@ def home():
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
+    # Health check should hit this route. If the worker is up, return 200.
+    return jsonify({"status": "healthy", "scheduler_active": SCHEDULER_ACTIVE, "timestamp": datetime.now().isoformat()}), 200
 
 @app.route('/status')
 def status():
     return jsonify(bot_stats), 200
 
+@app.route('/init-bot')
+def init_bot():
+    """CRITICAL ROUTE: This is hit externally once to start the exchange and thread."""
+    if SCHEDULER_ACTIVE:
+        return jsonify({"message": "Scheduler is already active."}), 200
+        
+    if init_exchange_and_ml():
+        return jsonify({"message": "Bot initialization complete. Scheduler started in background thread."}), 200
+    else:
+        return jsonify({"message": "Initialization failed. Check logs for exchange connection errors."}), 500
 
-# 2. CRITICAL STARTUP CODE (Thread Start - The last lines of execution)
 
-# This thread starts immediately when Gunicorn loads the 'app' instance
-if init_exchange_and_ml():
-    scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
-    scheduler_thread.start()
-    print("✅ Gunicorn loading Flask app. Scheduler thread initialized.")
-else:
-    print("❌ Failed to initialize critical components. Scheduler thread not started.")
+# 2. CRITICAL STARTUP CODE (No direct thread start here)
+print("✅ Gunicorn loading Flask app. Scheduler startup deferred.")
