@@ -1,4 +1,4 @@
-# main.py - Forex Edition: The Final, Corrected Structure
+# main.py - Forex Edition: The FINAL, STABLE CODE
 
 import os
 import ccxt
@@ -22,19 +22,18 @@ from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv 
 load_dotenv() 
 
-# --- General Configuration ---
+# --- Global Configuration (Must be before any function definitions) ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # --- FOREX PAIRS ---
+# CRITICAL FIX: Changed default broker and symbols to FXCM (or similar stable broker)
+EXCHANGE_ID = os.getenv("EXCHANGE_ID", "fxcm") 
 FOREX_PAIRS = os.getenv("FOREX_PAIRS", "EUR/USD,USD/JPY,GBP/USD,AUD/USD,USD/CAD").split(',') 
 SYMBOLS = [s.strip() for s in FOREX_PAIRS] 
 TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 DAILY_TIMEFRAME = '1d' 
 ANALYSIS_INTERVAL = 30 
-
-# --- EXCHANGE CONFIGURATION ---
-EXCHANGE_ID = os.getenv("EXCHANGE_ID", "oanda") 
 
 # Initialize Bot and Exchange
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -44,6 +43,7 @@ exchange_config = {
     'rateLimit': 1000, 
     'apiKey': os.getenv("FX_API_KEY"),
     'secret': os.getenv("FX_SECRET"),
+    # Add other necessary config if required by FXCM/your chosen broker
 }
 
 # Dynamically instantiate the exchange
@@ -52,6 +52,7 @@ try:
     exchange.load_markets() 
     print(f"✅ {EXCHANGE_ID.upper()} markets loaded successfully.")
 except Exception as e:
+    # Set status here for visibility before the thread starts
     print(f"❌ Failed to initialize/load markets for {EXCHANGE_ID}: {e}. Check .env credentials.")
     exit(1)
 
@@ -61,7 +62,7 @@ SCALER = None
 
 
 # =========================================================================
-# === SECTION 1: ALL FUNCTION DEFINITIONS (MUST BE HERE, BEFORE ANY APP/THREAD START) ===
+# === SECTION 1: ALL FUNCTION DEFINITIONS (CRITICALLY IMPORTANT PLACEMENT) ===
 # =========================================================================
 
 # 1. ML TRAINING FUNCTION
@@ -124,7 +125,6 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     """Fetches main chart data, prepares for analysis, and calculates SMAs."""
     
     try:
-        # Uses the normalized symbol ID loaded from exchange.markets
         fx_symbol_id = exchange.markets[symbol]['id']
     except KeyError:
         print(f"Error: Symbol {symbol} not found in exchange market list. Check symbol format or exchange support.")
@@ -288,12 +288,16 @@ async def generate_and_send_signal(symbol):
         
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
         
+        # NOTE: bot_stats defined below, must be updated
+        global bot_stats
         bot_stats['total_analyses'] += 1
         bot_stats['last_analysis'] = datetime.now().isoformat()
         bot_stats['status'] = "operational"
 
     except Exception as e:
         error_trace = traceback.format_exc()
+        # NOTE: bot_stats defined below, must be updated
+        global bot_stats
         bot_stats['status'] = f"Fatal Error in Analysis Thread: {str(e)[:40]}..."
         print(f"❌ Error generating signal for {symbol}: {e}")
         
@@ -315,7 +319,6 @@ async def start_scheduler_loop():
 
     print("\n⏳ Preparing and training Machine Learning Model...")
     try:
-        # Fetch data for training purposes (500 candles of the first symbol)
         ohlcv_train = exchange.fetch_ohlcv(exchange.markets[SYMBOLS[0]]['id'], TIMEFRAME, limit=600)
         df_train = pd.DataFrame(ohlcv_train, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_train['close'] = pd.to_numeric(df_train['close'])
@@ -340,6 +343,8 @@ async def start_scheduler_loop():
     
     scheduler.start()
     print("🚀 Scheduler started successfully.")
+    
+    global bot_stats
     bot_stats['status'] = "operational"
 
     # Run initial analysis immediately after scheduler starts
