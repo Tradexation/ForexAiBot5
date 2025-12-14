@@ -1,4 +1,4 @@
-# main.py - Forex Edition: Stable, ML-Enhanced Web Service
+# main.py - Forex Edition: The Final Structured Code
 
 import os
 import ccxt
@@ -27,15 +27,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # --- FOREX PAIRS ---
-# Top 5 Most Traded Forex Pairs (Standard CCXT format)
 FOREX_PAIRS = os.getenv("FOREX_PAIRS", "EUR/USD,USD/JPY,GBP/USD,AUD/USD,USD/CAD").split(',') 
-SYMBOLS = [s.strip() for s in FOREX_PAIRS] # Renamed CRYPTOS to SYMBOLS
+SYMBOLS = [s.strip() for s in FOREX_PAIRS] 
 TIMEFRAME = os.getenv("TIMEFRAME", "4h")
 DAILY_TIMEFRAME = '1d' 
 ANALYSIS_INTERVAL = 30 
 
-# --- EXCHANGE CONFIGURATION (You MUST set the actual broker/keys in .env) ---
-# Example using 'oanda' (requires specific apiKey, secret, etc. in .env)
+# --- EXCHANGE CONFIGURATION ---
 EXCHANGE_ID = os.getenv("EXCHANGE_ID", "oanda") 
 
 # Initialize Bot and Exchange
@@ -51,62 +49,31 @@ exchange_config = {
 # Dynamically instantiate the exchange
 try:
     exchange = getattr(ccxt, EXCHANGE_ID)(exchange_config)
-    exchange.load_markets() # Load markets immediately for symbol normalization
+    exchange.load_markets() 
     print(f"✅ {EXCHANGE_ID.upper()} markets loaded successfully.")
 except Exception as e:
     print(f"❌ Failed to initialize/load markets for {EXCHANGE_ID}: {e}. Check .env credentials.")
-    exit(1) # Exit if the exchange fails to initialize
+    exit(1)
 
-# Global ML Model and Scaler
+# Global ML Model and Scaler (must be global for training/prediction)
 ML_MODEL = None
 SCALER = None
 
-# ========== FLASK WEB SERVER & STATUS TRACKING ==========
-app = Flask(__name__) 
 
-bot_stats = {
-    "status": "initializing",
-    "total_analyses": 0,
-    "last_analysis": None,
-    "monitored_assets": SYMBOLS,
-    "uptime_start": datetime.now().isoformat()
-}
-
-@app.route('/')
-def home():
-    return render_template_string("<h1>Forex Bot Status Page</h1>" + 
-                                 f"<p>Status: {bot_stats['status']}</p>" + 
-                                 f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
-                                 f"<p>Last Analysis: {bot_stats['last_analysis'] or 'N/A'}</p>" +
-                                 f"<p>Exchange: {EXCHANGE_ID.upper()}</p>")
-# ... (rest of Flask routes remain the same) ...
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
-
-@app.route('/status')
-def status():
-    return jsonify(bot_stats), 200
-
-
-# ========== ML TRAINING FUNCTION ==========
+# ========== 1. ALL TECHNICAL ANALYSIS AND ML FUNCTIONS (MUST BE FIRST) ==========
 
 def train_prediction_model(df):
     """Trains a Logistic Regression model and returns the model and scaler."""
     global SCALER
-    
+    # ... (ML training logic remains unchanged) ...
     if len(df) < 500:
         print("⚠️ Not enough data (need 500+ rows) for robust ML training. Skipping.")
         return None, None
 
-    # 1. Target Definition (y)
     df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
-    
-    # 2. Feature Engineering (X)
     df['fast_over_slow'] = np.where(df['fast_sma'] > df['slow_sma'], 1, 0)
     df['close_over_fast'] = np.where(df['close'] > df['fast_sma'], 1, 0)
     df['volatility'] = df['close'].pct_change().rolling(20).std().fillna(0) 
-    
     df = df.dropna()
     
     X = df[['fast_over_slow', 'close_over_fast', 'volatility']]
@@ -115,22 +82,19 @@ def train_prediction_model(df):
     X_train = X.iloc[:-int(len(X) * 0.1)]
     y_train = y.iloc[:-int(len(y) * 0.1)]
 
-    # 3. Scaling
     SCALER = StandardScaler()
     X_train_scaled = SCALER.fit_transform(X_train)
 
-    # 4. Training
     model = LogisticRegression(solver='liblinear')
     model.fit(X_train_scaled, y_train)
     
     print(f"✅ ML Model trained successfully. Accuracy: {model.score(X_train_scaled, y_train):.2f}")
     return model, SCALER
 
-# ========== TECHNICAL ANALYSIS FUNCTIONS ==========
 
-# 1. CPR Calculation Function
 def calculate_cpr_levels(df_daily):
     """Calculates Daily Pivot Points (PP, TC, BC, R/S levels) from previous day's data."""
+    # ... (CPR calculation logic remains unchanged) ...
     if df_daily.empty or len(df_daily) < 2:
         return None
 
@@ -151,19 +115,16 @@ def calculate_cpr_levels(df_daily):
     return {'PP': PP, 'TC': TC, 'BC': BC, 'R1': R1, 'S1': S1,
             'R2': R2, 'S2': S2, 'R3': R3, 'S3': S3}
 
-# 2. Data Fetching and Preparation Function
+
 def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     """Fetches main chart data, prepares for analysis, and calculates SMAs."""
-    
-    # --- FOREX FIX: Normalize the symbol ID before fetching ---
+    # ... (Data fetching/cleaning logic remains unchanged) ...
     try:
-        # Get the exchange-specific symbol ID (e.g., 'EUR_USD' for Oanda, or 'EUR/USD' sometimes works)
         fx_symbol_id = exchange.markets[symbol]['id']
     except KeyError:
         print(f"Error: Symbol {symbol} not found in exchange market list. Check symbol format or exchange support.")
         return pd.DataFrame(), None
 
-    # Fetch main chart data
     ohlcv = exchange.fetch_ohlcv(fx_symbol_id, timeframe, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -172,7 +133,6 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     
     df['fast_sma'] = df['close'].rolling(window=9).mean()
     df['slow_sma'] = df['close'].rolling(window=20).mean()
-    
     df = df.dropna() 
     
     if len(df) < 20: 
@@ -186,10 +146,10 @@ def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     
     return df, cpr_levels
 
-# 3. Trend and Signal Generation
+
 def get_trend_and_signal(df, cpr_levels):
     """Determines trend via SMA crossover and incorporates ML prediction."""
-    
+    # ... (Prediction and signal logic remains unchanged) ...
     latest = df.iloc[-1]
     current_price = latest['close']
     fast_sma = latest['fast_sma']
@@ -199,13 +159,12 @@ def get_trend_and_signal(df, cpr_levels):
     ml_prediction = "NEUTRAL (No Model)"
     if ML_MODEL is not None and SCALER is not None:
         try:
-            # 1. Feature Engineering
             is_fast_over_slow = 1 if fast_sma > slow_sma else 0
             is_close_over_fast = 1 if current_price > fast_sma else 0
             
-            # --- FIX: Calculate current volatility robustly ---
+            # --- CRITICAL ROBUSTNESS FIX ---
             close_prices_recent = df['close'].iloc[-20:] 
-            if len(close_prices_recent) < 20: 
+            if len(close_prices_recent) < 20:
                  current_volatility = 0.0
             else:
                  returns = close_prices_recent.pct_change().dropna()
@@ -213,20 +172,17 @@ def get_trend_and_signal(df, cpr_levels):
                  current_volatility = current_volatility.iloc[-1] if isinstance(current_volatility, pd.Series) and not current_volatility.empty else float(current_volatility)
                  current_volatility = 0.0 if np.isinf(current_volatility) or np.isnan(current_volatility) else current_volatility
 
-            # 2. Build the latest features DataFrame
             latest_features = pd.DataFrame({
                 'fast_over_slow': [is_fast_over_slow],
                 'close_over_fast': [is_close_over_fast],
                 'volatility': [current_volatility] 
             })
             
-            # 3. Scaling and Prediction
             X_predict_scaled = SCALER.transform(latest_features)
             prediction = ML_MODEL.predict(X_predict_scaled)[0]
             probability = ML_MODEL.predict_proba(X_predict_scaled)[0]
             bullish_prob = probability[1]
             
-            # 4. Final Prediction Output
             if prediction == 1 and bullish_prob > 0.55:
                 ml_prediction = f"BULLISH ({bullish_prob*100:.0f}%)"
             elif prediction == 0 and probability[0] > 0.55:
@@ -238,23 +194,17 @@ def get_trend_and_signal(df, cpr_levels):
             print(f"❌ ML PREDICTION FAILED (Runtime Error): {e}")
             ml_prediction = "NEUTRAL (ML Error)"
             
-    # --- Final Signal Generation ---
+    # --- Final Signal Generation (Trend, Proximity, Final Signal) ---
     trend = "Neutral"
-    if fast_sma > slow_sma:
-        trend = "Uptrend"
-        trend_emoji = "🟢"
-    elif fast_sma < slow_sma:
-        trend = "Downtrend"
-        trend_emoji = "🔴"
-    else:
-        trend_emoji = "🟡"
+    if fast_sma > slow_sma: trend = "Uptrend"; trend_emoji = "🟢"
+    elif fast_sma < slow_sma: trend = "Downtrend"; trend_emoji = "🔴"
+    else: trend_emoji = "🟡"
 
     pp = cpr_levels.get('PP', 'N/A')
-    
     proximity_msg = ""
     if pp != 'N/A':
         distance_to_pp = current_price - pp
-        if abs(distance_to_pp / pp) < 0.0005: # Forex pairs are often 4 decimal places
+        if abs(distance_to_pp / pp) < 0.0005: 
             proximity_msg = "Price is near the <b>Central Pivot Point (PP)</b>."
         elif distance_to_pp > 0:
             proximity_msg = f"Price is <b>Above PP</b> ({pp:.5f})."
@@ -272,16 +222,46 @@ def get_trend_and_signal(df, cpr_levels):
         
     return trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction
 
-# 4. ASYNC SCHEDULER FUNCTIONS
+
+# ========== 2. FLASK WEB SERVER & STATUS TRACKING (App object is defined here) ==========
+app = Flask(__name__) 
+
+bot_stats = {
+    "status": "initializing",
+    "total_analyses": 0,
+    "last_analysis": None,
+    "monitored_assets": SYMBOLS,
+    "uptime_start": datetime.now().isoformat()
+}
+
+@app.route('/')
+def home():
+    return render_template_string("<h1>Forex Bot Status Page</h1>" + 
+                                 f"<p>Status: {bot_stats['status']}</p>" + 
+                                 f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
+                                 f"<p>Last Analysis: {bot_stats['last_analysis'] or 'N/A'}</p>" +
+                                 f"<p>Exchange: {EXCHANGE_ID.upper()}</p>")
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
+
+@app.route('/status')
+def status():
+    # If the thread hasn't started yet, the error message from the crash will be in bot_stats['status']
+    return jsonify(bot_stats), 200
+
+
+# ========== 3. ASYNC SCHEDULER FUNCTIONS (These call the analysis functions above) ==========
 
 async def generate_and_send_signal(symbol):
-    """Fetches data, runs analysis, and sends the Telegram message."""
+    """Orchestrates data, analysis, and messaging."""
     
     try:
         df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
         
         if df.empty or cpr_levels is None:
-            message = f"🚨 Data Fetch/Processing Error for {symbol}. Could not generate signal (Insufficient clean data)."
+            message = f"🚨 Data Fetch/Processing Error for {symbol}."
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
             return
 
@@ -297,8 +277,6 @@ async def generate_and_send_signal(symbol):
             f"  - <b>R1/S1:</b> <code>{cpr_levels['R1']:{price_format}}</code> / <code>{cpr_levels['S1']:{price_format}}</code>\n"
             f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:{price_format}}</code> / <code>{cpr_levels['S2']:{price_format}}</code>\n"
         )
-        
-        # --- FINAL PROFESSIONAL HTML MESSAGE TEMPLATE ---
         
         message = (
             f"╔════════════════════════════════╗\n"
@@ -326,10 +304,7 @@ async def generate_and_send_signal(symbol):
             f"<i>Exchange: {EXCHANGE_ID.upper()} | Disclaimer: For educational use only.</i>"
         )
 
-        # Apply global HTML escaping
         message = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        
-        # Revert valid HTML tags back from their escaped form
         message = message.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
         message = message.replace('&lt;code&gt;', '<code>').replace('&lt;/code&gt;', '</code>')
         message = message.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
@@ -342,6 +317,8 @@ async def generate_and_send_signal(symbol):
 
     except Exception as e:
         error_trace = traceback.format_exc()
+        # Set status for the web page
+        bot_stats['status'] = f"Fatal Error in Analysis Thread: {str(e)[:40]}..."
         print(f"❌ Error generating signal for {symbol}: {e}")
         
         diagnostic_message = (
@@ -387,6 +364,7 @@ async def start_scheduler_loop():
     
     scheduler.start()
     print("🚀 Scheduler started successfully.")
+    bot_stats['status'] = "operational"
 
     # Run initial analysis immediately after scheduler starts
     await generate_and_send_signal(SYMBOLS[0].strip()) 
@@ -398,14 +376,12 @@ async def start_scheduler_loop():
         await asyncio.sleep(60)
 
 
-# 5. CRITICAL STARTUP THREAD
+# ========== 4. CRITICAL STARTUP THREAD (This runs last) ==========
 
 def start_asyncio_thread():
     """Target function for the background thread."""
-    try:
-        asyncio.run(start_scheduler_loop())
-    except Exception as e:
-        print(f"FATAL SCHEDULER ERROR: {e}")
+    # Ensure this runs the scheduler loop
+    asyncio.run(start_scheduler_loop())
 
 # This thread starts immediately when Gunicorn loads the 'app' instance
 scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
