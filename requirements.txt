@@ -1,0 +1,10 @@
+# requirements.txt
+ccxt
+pandas
+numpy
+scikit-learn
+python-telegram-bot
+APScheduler
+python-dotenv
+Flask
+gunicorn

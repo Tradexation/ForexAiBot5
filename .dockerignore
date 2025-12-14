@@ -1,0 +1,14 @@
+# .dockerignore
+
+# Ignore secrets/environment files
+.env
+.env.example
+
+# Ignore Git files
+.git
+.gitignore
+
+# Ignore temporary folders
+__pycache__
+*.pyc
+.venv
