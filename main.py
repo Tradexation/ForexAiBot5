@@ -1,238 +1,414 @@
-# main.py - Minimal Working Forex Bot for Render
-# Guaranteed to work with Gunicorn
+# main.py - Forex Edition: Stable, ML-Enhanced Web Service
 
 import os
-from flask import Flask, jsonify
-from dotenv import load_dotenv
+import ccxt
+import pandas as pd
+import numpy as np
+import asyncio
+from datetime import datetime, timedelta
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram import Bot
+from flask import Flask, jsonify, render_template_string
+import threading
+import time
+import traceback 
 
-load_dotenv()
+# --- ML Imports ---
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split 
+from sklearn.preprocessing import StandardScaler 
 
-# Create Flask app FIRST (must be at module level for Gunicorn)
-app = Flask(__name__)
+# --- CONFIGURATION LOADING ---
+from dotenv import load_dotenv 
+load_dotenv() 
 
-# Basic routes to keep service alive
+# --- General Configuration ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# --- FOREX PAIRS ---
+# Top 5 Most Traded Forex Pairs (Standard CCXT format)
+FOREX_PAIRS = os.getenv("FOREX_PAIRS", "EUR/USD,USD/JPY,GBP/USD,AUD/USD,USD/CAD").split(',') 
+SYMBOLS = [s.strip() for s in FOREX_PAIRS] # Renamed CRYPTOS to SYMBOLS
+TIMEFRAME = os.getenv("TIMEFRAME", "4h")
+DAILY_TIMEFRAME = '1d' 
+ANALYSIS_INTERVAL = 30 
+
+# --- EXCHANGE CONFIGURATION (You MUST set the actual broker/keys in .env) ---
+# Example using 'oanda' (requires specific apiKey, secret, etc. in .env)
+EXCHANGE_ID = os.getenv("EXCHANGE_ID", "oanda") 
+
+# Initialize Bot and Exchange
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+exchange_config = {
+    'enableRateLimit': True,
+    'rateLimit': 1000, 
+    'apiKey': os.getenv("FX_API_KEY"),
+    'secret': os.getenv("FX_SECRET"),
+}
+
+# Dynamically instantiate the exchange
+try:
+    exchange = getattr(ccxt, EXCHANGE_ID)(exchange_config)
+    exchange.load_markets() # Load markets immediately for symbol normalization
+    print(f"✅ {EXCHANGE_ID.upper()} markets loaded successfully.")
+except Exception as e:
+    print(f"❌ Failed to initialize/load markets for {EXCHANGE_ID}: {e}. Check .env credentials.")
+    exit(1) # Exit if the exchange fails to initialize
+
+# Global ML Model and Scaler
+ML_MODEL = None
+SCALER = None
+
+# ========== FLASK WEB SERVER & STATUS TRACKING ==========
+app = Flask(__name__) 
+
+bot_stats = {
+    "status": "initializing",
+    "total_analyses": 0,
+    "last_analysis": None,
+    "monitored_assets": SYMBOLS,
+    "uptime_start": datetime.now().isoformat()
+}
+
 @app.route('/')
 def home():
-    return """
-    <html>
-    <head><title>Forex Bot</title></head>
-    <body style="font-family: Arial; padding: 40px; text-align: center; background: #1e3c72; color: white;">
-        <h1>💱 Forex Analysis Bot</h1>
-        <h2 style="color: #4CAF50;">✅ RUNNING</h2>
-        <p>Bot is operational and sending analyses to Telegram.</p>
-    </body>
-    </html>
-    """
-
+    return render_template_string("<h1>Forex Bot Status Page</h1>" + 
+                                 f"<p>Status: {bot_stats['status']}</p>" + 
+                                 f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
+                                 f"<p>Last Analysis: {bot_stats['last_analysis'] or 'N/A'}</p>" +
+                                 f"<p>Exchange: {EXCHANGE_ID.upper()}</p>")
+# ... (rest of Flask routes remain the same) ...
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy"}), 200
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
 
-# Only start background tasks AFTER Flask is fully initialized
-@app.before_first_request
-def initialize():
-    """Start background analysis after first web request"""
-    import threading
-    threading.Thread(target=start_analysis_worker, daemon=True).start()
+@app.route('/status')
+def status():
+    return jsonify(bot_stats), 200
 
-def start_analysis_worker():
-    """Background worker that runs analysis"""
-    import time
-    import ccxt
-    import pandas as pd
-    import numpy as np
-    from telegram import Bot
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.preprocessing import StandardScaler
-    from datetime import datetime
+
+# ========== ML TRAINING FUNCTION ==========
+
+def train_prediction_model(df):
+    """Trains a Logistic Regression model and returns the model and scaler."""
+    global SCALER
     
-    print("\n" + "="*60)
-    print("🚀 STARTING FOREX ANALYSIS WORKER")
-    print("="*60)
-    
-    # Configuration
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    FOREX_PAIRS = os.getenv("FOREX_PAIRS", "EUR/USD,USD/JPY,GBP/USD").split(',')
-    TIMEFRAME = os.getenv("TIMEFRAME", "4h")
-    INTERVAL_MINUTES = int(os.getenv("ANALYSIS_INTERVAL", "30"))
-    
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    exchange = ccxt.kraken({'enableRateLimit': True})
-    
-    # Global ML model
-    ml_model = None
-    scaler = None
-    
-    def train_model(df):
-        """Train simple ML model"""
-        try:
-            if len(df) < 100:
-                return None, None
-            
-            df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
-            df['sma_fast'] = df['close'].rolling(9).mean()
-            df['sma_slow'] = df['close'].rolling(20).mean()
-            df['momentum'] = df['close'].pct_change(5).fillna(0)
-            df = df.dropna()
-            
-            if len(df) < 50:
-                return None, None
-            
-            X = df[['sma_fast', 'sma_slow', 'momentum']].copy()
-            y = df['target'].copy()
-            
-            split = int(len(X) * 0.9)
-            X_train = X.iloc[:split]
-            y_train = y.iloc[:split]
-            
-            scaler_local = StandardScaler()
-            X_scaled = scaler_local.fit_transform(X_train)
-            
-            model = LogisticRegression(solver='liblinear', max_iter=1000)
-            model.fit(X_scaled, y_train)
-            
-            print(f"✅ ML Model trained: {model.score(X_scaled, y_train):.1%} accuracy")
-            return model, scaler_local
-        except Exception as e:
-            print(f"⚠️ ML training failed: {e}")
-            return None, None
-    
-    def analyze_pair(pair):
-        """Analyze single forex pair"""
-        try:
-            print(f"\n📊 Analyzing {pair}...")
-            
-            # Fetch data
-            ohlcv = exchange.fetch_ohlcv(pair, TIMEFRAME, limit=200)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            # Calculate indicators
-            df['sma_9'] = df['close'].rolling(9).mean()
-            df['sma_20'] = df['close'].rolling(20).mean()
-            
-            # RSI
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rs = gain / loss
-            df['rsi'] = 100 - (100 / (1 + rs))
-            
-            df = df.dropna()
-            
-            if len(df) < 20:
-                return None
-            
-            latest = df.iloc[-1]
-            price = latest['close']
-            sma9 = latest['sma_9']
-            sma20 = latest['sma_20']
-            rsi = latest['rsi']
-            
-            # Simple trend
-            if price > sma9 > sma20:
-                trend = "UPTREND 🟢"
-            elif price < sma9 < sma20:
-                trend = "DOWNTREND 🔴"
-            else:
-                trend = "SIDEWAYS 🟡"
-            
-            # ML prediction
-            ml_signal = "NEUTRAL"
-            if ml_model and scaler:
-                try:
-                    features = pd.DataFrame({
-                        'sma_fast': [sma9],
-                        'sma_slow': [sma20],
-                        'momentum': [df['close'].pct_change(5).iloc[-1]]
-                    })
-                    X_scaled = scaler.transform(features)
-                    pred = ml_model.predict(X_scaled)[0]
-                    ml_signal = "BULLISH" if pred == 1 else "BEARISH"
-                except:
-                    pass
-            
-            # Signal
-            if ml_signal == "BULLISH" and price > sma20:
-                signal = "BUY 🟢"
-            elif ml_signal == "BEARISH" and price < sma20:
-                signal = "SELL 🔴"
-            else:
-                signal = "HOLD 🟡"
-            
-            # RSI status
-            if rsi > 70:
-                rsi_txt = f"{rsi:.1f} OVERBOUGHT ⚠️"
-            elif rsi < 30:
-                rsi_txt = f"{rsi:.1f} OVERSOLD 📉"
-            else:
-                rsi_txt = f"{rsi:.1f} NEUTRAL"
-            
-            # Build message
-            message = f"""
-╔═══════════════════════════════╗
-  💱 FOREX ANALYSIS
-╚═══════════════════════════════╝
+    if len(df) < 500:
+        print("⚠️ Not enough data (need 500+ rows) for robust ML training. Skipping.")
+        return None, None
 
-<b>{pair}</b>
-{datetime.now().strftime('%Y-%m-%d %H:%M UTC')}
-
-━━━ <b>SIGNAL: {signal}</b> ━━━
-
-💰 Price: <code>{price:.5f}</code>
-⏰ Timeframe: {TIMEFRAME}
-
-🤖 AI: <b>{ml_signal}</b>
-📊 Trend: {trend}
-
-📈 SMA 9: <code>{sma9:.5f}</code>
-📈 SMA 20: <code>{sma20:.5f}</code>
-📊 RSI: {rsi_txt}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-<i>Educational purposes only. Not financial advice.</i>
-"""
-            
-            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
-            print(f"✅ Sent: {pair} | {signal}")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error analyzing {pair}: {e}")
-            return False
+    # 1. Target Definition (y)
+    df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
     
-    # Train ML model once on startup
-    print("\n⏳ Training ML model...")
+    # 2. Feature Engineering (X)
+    df['fast_over_slow'] = np.where(df['fast_sma'] > df['slow_sma'], 1, 0)
+    df['close_over_fast'] = np.where(df['close'] > df['fast_sma'], 1, 0)
+    df['volatility'] = df['close'].pct_change().rolling(20).std().fillna(0) 
+    
+    df = df.dropna()
+    
+    X = df[['fast_over_slow', 'close_over_fast', 'volatility']]
+    y = df['target']
+    
+    X_train = X.iloc[:-int(len(X) * 0.1)]
+    y_train = y.iloc[:-int(len(y) * 0.1)]
+
+    # 3. Scaling
+    SCALER = StandardScaler()
+    X_train_scaled = SCALER.fit_transform(X_train)
+
+    # 4. Training
+    model = LogisticRegression(solver='liblinear')
+    model.fit(X_train_scaled, y_train)
+    
+    print(f"✅ ML Model trained successfully. Accuracy: {model.score(X_train_scaled, y_train):.2f}")
+    return model, SCALER
+
+# ========== TECHNICAL ANALYSIS FUNCTIONS ==========
+
+# 1. CPR Calculation Function
+def calculate_cpr_levels(df_daily):
+    """Calculates Daily Pivot Points (PP, TC, BC, R/S levels) from previous day's data."""
+    if df_daily.empty or len(df_daily) < 2:
+        return None
+
+    prev_day = df_daily.iloc[-2]  
+    H, L, C = prev_day['high'], prev_day['low'], prev_day['close']
+    
+    PP = (H + L + C) / 3.0
+    BC = (H + L) / 2.0
+    TC = PP - BC + PP
+    
+    R1 = 2 * PP - L
+    S1 = 2 * PP - H
+    R2 = PP + (H - L)
+    S2 = PP - (H - L)
+    R3 = H + 2 * (PP - L)
+    S3 = L - 2 * (H - PP)
+    
+    return {'PP': PP, 'TC': TC, 'BC': BC, 'R1': R1, 'S1': S1,
+            'R2': R2, 'S2': S2, 'R3': R3, 'S3': S3}
+
+# 2. Data Fetching and Preparation Function
+def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
+    """Fetches main chart data, prepares for analysis, and calculates SMAs."""
+    
+    # --- FOREX FIX: Normalize the symbol ID before fetching ---
     try:
-        first_pair = FOREX_PAIRS[0].strip()
-        ohlcv = exchange.fetch_ohlcv(first_pair, TIMEFRAME, limit=500)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        ml_model, scaler = train_model(df)
-    except Exception as e:
-        print(f"⚠️ ML training skipped: {e}")
-    
-    print(f"\n✅ Worker initialized. Analyzing every {INTERVAL_MINUTES} minutes.")
-    print(f"📊 Monitoring: {', '.join(FOREX_PAIRS)}\n")
-    
-    # Initial analysis
-    for pair in FOREX_PAIRS:
-        analyze_pair(pair.strip())
-        time.sleep(5)
-    
-    # Main loop
-    while True:
-        try:
-            time.sleep(INTERVAL_MINUTES * 60)  # Wait interval
-            
-            for pair in FOREX_PAIRS:
-                analyze_pair(pair.strip())
-                time.sleep(5)  # Delay between pairs
-                
-        except Exception as e:
-            print(f"❌ Worker error: {e}")
-            time.sleep(60)  # Wait 1 min on error
+        # Get the exchange-specific symbol ID (e.g., 'EUR_USD' for Oanda, or 'EUR/USD' sometimes works)
+        fx_symbol_id = exchange.markets[symbol]['id']
+    except KeyError:
+        print(f"Error: Symbol {symbol} not found in exchange market list. Check symbol format or exchange support.")
+        return pd.DataFrame(), None
 
-# For local testing only
-if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Fetch main chart data
+    ohlcv = exchange.fetch_ohlcv(fx_symbol_id, timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df = df.dropna()
+    
+    df['fast_sma'] = df['close'].rolling(window=9).mean()
+    df['slow_sma'] = df['close'].rolling(window=20).mean()
+    
+    df = df.dropna() 
+    
+    if len(df) < 20: 
+        return pd.DataFrame(), None
+    
+    ohlcv_daily = exchange.fetch_ohlcv(fx_symbol_id, daily_timeframe, limit=20) 
+    df_daily = pd.DataFrame(ohlcv_daily, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df_daily.set_index('timestamp', inplace=True)
+    
+    cpr_levels = calculate_cpr_levels(df_daily)
+    
+    return df, cpr_levels
+
+# 3. Trend and Signal Generation
+def get_trend_and_signal(df, cpr_levels):
+    """Determines trend via SMA crossover and incorporates ML prediction."""
+    
+    latest = df.iloc[-1]
+    current_price = latest['close']
+    fast_sma = latest['fast_sma']
+    slow_sma = latest['slow_sma']
+    
+    # --- ML Prediction ---
+    ml_prediction = "NEUTRAL (No Model)"
+    if ML_MODEL is not None and SCALER is not None:
+        try:
+            # 1. Feature Engineering
+            is_fast_over_slow = 1 if fast_sma > slow_sma else 0
+            is_close_over_fast = 1 if current_price > fast_sma else 0
+            
+            # --- FIX: Calculate current volatility robustly ---
+            close_prices_recent = df['close'].iloc[-20:] 
+            if len(close_prices_recent) < 20: 
+                 current_volatility = 0.0
+            else:
+                 returns = close_prices_recent.pct_change().dropna()
+                 current_volatility = returns.std(skipna=True).fillna(0)
+                 current_volatility = current_volatility.iloc[-1] if isinstance(current_volatility, pd.Series) and not current_volatility.empty else float(current_volatility)
+                 current_volatility = 0.0 if np.isinf(current_volatility) or np.isnan(current_volatility) else current_volatility
+
+            # 2. Build the latest features DataFrame
+            latest_features = pd.DataFrame({
+                'fast_over_slow': [is_fast_over_slow],
+                'close_over_fast': [is_close_over_fast],
+                'volatility': [current_volatility] 
+            })
+            
+            # 3. Scaling and Prediction
+            X_predict_scaled = SCALER.transform(latest_features)
+            prediction = ML_MODEL.predict(X_predict_scaled)[0]
+            probability = ML_MODEL.predict_proba(X_predict_scaled)[0]
+            bullish_prob = probability[1]
+            
+            # 4. Final Prediction Output
+            if prediction == 1 and bullish_prob > 0.55:
+                ml_prediction = f"BULLISH ({bullish_prob*100:.0f}%)"
+            elif prediction == 0 and probability[0] > 0.55:
+                ml_prediction = f"BEARISH ({probability[0]*100:.0f}%)"
+            else:
+                 ml_prediction = "NEUTRAL (Low Conviction)"
+
+        except Exception as e:
+            print(f"❌ ML PREDICTION FAILED (Runtime Error): {e}")
+            ml_prediction = "NEUTRAL (ML Error)"
+            
+    # --- Final Signal Generation ---
+    trend = "Neutral"
+    if fast_sma > slow_sma:
+        trend = "Uptrend"
+        trend_emoji = "🟢"
+    elif fast_sma < slow_sma:
+        trend = "Downtrend"
+        trend_emoji = "🔴"
+    else:
+        trend_emoji = "🟡"
+
+    pp = cpr_levels.get('PP', 'N/A')
+    
+    proximity_msg = ""
+    if pp != 'N/A':
+        distance_to_pp = current_price - pp
+        if abs(distance_to_pp / pp) < 0.0005: # Forex pairs are often 4 decimal places
+            proximity_msg = "Price is near the <b>Central Pivot Point (PP)</b>."
+        elif distance_to_pp > 0:
+            proximity_msg = f"Price is <b>Above PP</b> ({pp:.5f})."
+        else:
+            proximity_msg = f"Price is <b>Below PP</b> ({pp:.5f})."
+            
+    signal = "HOLD"
+    signal_emoji = "🟡"
+    if "BULLISH" in ml_prediction and current_price > pp:
+        signal = "STRONG BUY"
+        signal_emoji = "🚀"
+    elif "BEARISH" in ml_prediction and current_price < pp:
+        signal = "STRONG SELL"
+        signal_emoji = "🔻"
+        
+    return trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction
+
+# 4. ASYNC SCHEDULER FUNCTIONS
+
+async def generate_and_send_signal(symbol):
+    """Fetches data, runs analysis, and sends the Telegram message."""
+    
+    try:
+        df, cpr_levels = fetch_and_prepare_data(symbol, TIMEFRAME)
+        
+        if df.empty or cpr_levels is None:
+            message = f"🚨 Data Fetch/Processing Error for {symbol}. Could not generate signal (Insufficient clean data)."
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+            return
+
+        trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction = get_trend_and_signal(df, cpr_levels)
+        current_price = df.iloc[-1]['close']
+        
+        # Determine the price precision (4 or 5 decimal places is standard for FX)
+        price_format = ".5f" if current_price < 10 else ".4f"
+        
+        cpr_text = (
+            f"<b>Daily CPR Levels:</b>\n"
+            f"  - <b>PP (Pivot Point):</b> <code>{cpr_levels['PP']:{price_format}}</code>\n"
+            f"  - <b>R1/S1:</b> <code>{cpr_levels['R1']:{price_format}}</code> / <code>{cpr_levels['S1']:{price_format}}</code>\n"
+            f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:{price_format}}</code> / <code>{cpr_levels['S2']:{price_format}}</code>\n"
+        )
+        
+        # --- FINAL PROFESSIONAL HTML MESSAGE TEMPLATE ---
+        
+        message = (
+            f"╔════════════════════════════════╗\n"
+            f"  🧠 <b>FOREX AI INTELLIGENCE REPORT</b>\n"
+            f"╚════════════════════════════════╝\n\n"
+            
+            f"** {symbol} | {datetime.now().strftime('%Y-%m-%d %H:%M UTC')} **\n\n"
+            
+            f"---🚨 <b>{signal_emoji} FINAL SIGNAL: {signal}</b> 🚨---\n\n"
+            
+            f"<b>💰 Current Price:</b> <code>{current_price:{price_format}}</code>\n"
+            f"<b>⏰ Timeframe:</b> {TIMEFRAME}\n"
+            
+            f"\n\n<b>🤖 ML PREDICTION</b>\n"
+            f"<b>Forecast:</b> {ml_prediction}\n"
+            f"<b>Confidence:</b> {ml_prediction.split(' ')[-1].replace(')', '').replace('(', '')}\n"
+            
+            f"\n\n<b>📊 TECHNICAL & KEY LEVELS</b>\n"
+            f"{trend_emoji} <b>Trend (SMA 9/20):</b> {trend}\n"
+            f"{proximity_msg.replace('**', '<b>').replace('**', '</b>')}\n\n"
+            
+            f"{cpr_text}\n"
+            
+            f"----------------------------------------\n"
+            f"<i>Exchange: {EXCHANGE_ID.upper()} | Disclaimer: For educational use only.</i>"
+        )
+
+        # Apply global HTML escaping
+        message = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        # Revert valid HTML tags back from their escaped form
+        message = message.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+        message = message.replace('&lt;code&gt;', '<code>').replace('&lt;/code&gt;', '</code>')
+        message = message.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
+        
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+        
+        bot_stats['total_analyses'] += 1
+        bot_stats['last_analysis'] = datetime.now().isoformat()
+        bot_stats['status'] = "operational"
+
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        print(f"❌ Error generating signal for {symbol}: {e}")
+        
+        diagnostic_message = (
+            f"❌ <b>FATAL FOREX ANALYSIS ERROR for {symbol}</b> ❌\n\n"
+            f"<b>Time:</b> {datetime.now().strftime('%H:%M:%S UTC')}\n"
+            f"<b>Issue:</b> The calculation thread crashed.\n\n"
+            f"<b>Source Trace:</b>\n<code>{str(e)[:150]}</code>" 
+        )
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=diagnostic_message, parse_mode='HTML')
+
+
+async def start_scheduler_loop():
+    """Sets up the scheduler and keeps the asyncio loop running."""
+    
+    # --- ML Training before starting the loop ---
+    global ML_MODEL
+    global SCALER
+
+    print("\n⏳ Preparing and training Machine Learning Model...")
+    try:
+        # Fetch data for training purposes (500 candles of the first symbol)
+        ohlcv_train = exchange.fetch_ohlcv(exchange.markets[SYMBOLS[0]]['id'], TIMEFRAME, limit=600)
+        df_train = pd.DataFrame(ohlcv_train, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df_train['close'] = pd.to_numeric(df_train['close'])
+        
+        df_train['fast_sma'] = df_train['close'].rolling(window=9).mean()
+        df_train['slow_sma'] = df_train['close'].rolling(window=20).mean()
+        df_train = df_train.dropna()
+        
+        ML_MODEL, SCALER = train_prediction_model(df_train)
+        
+    except Exception as e:
+        print(f"❌ ML Model Training Failed: {e}")
+        ML_MODEL = None
+        SCALER = None
+
+
+    # --- Start the scheduler loop ---
+    scheduler = AsyncIOScheduler()
+    
+    for symbol in SYMBOLS:
+        scheduler.add_job(generate_and_send_signal, 'cron', minute='0,30', args=[symbol]) 
+    
+    scheduler.start()
+    print("🚀 Scheduler started successfully.")
+
+    # Run initial analysis immediately after scheduler starts
+    await generate_and_send_signal(SYMBOLS[0].strip()) 
+    if len(SYMBOLS) > 1:
+        await generate_and_send_signal(SYMBOLS[1].strip())
+
+    # Keep the main thread running (Worker thread)
+    while True:
+        await asyncio.sleep(60)
+
+
+# 5. CRITICAL STARTUP THREAD
+
+def start_asyncio_thread():
+    """Target function for the background thread."""
+    try:
+        asyncio.run(start_scheduler_loop())
+    except Exception as e:
+        print(f"FATAL SCHEDULER ERROR: {e}")
+
+# This thread starts immediately when Gunicorn loads the 'app' instance
+scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
+scheduler_thread.start()
+
+print("✅ Gunicorn loading Flask app. Scheduler thread initialized.")
