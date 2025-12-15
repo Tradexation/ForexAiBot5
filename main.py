@@ -1,4 +1,4 @@
-# main.py - FINAL, STABLE FOREX WEB SERVICE CODE
+# main.py - FINAL, STABLE KUCOIN PROXY WEB SERVICE (No API Key Required)
 
 import os
 import ccxt
@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import asyncio
 from datetime import datetime, timedelta
-from apscheduler.schedulers.background import BackgroundScheduler # CRITICAL: Switched to BackgroundScheduler
+from apscheduler.schedulers.background import BackgroundScheduler # CRITICAL: Switched to BackgroundScheduler for Gunicorn stability
 from telegram import Bot
 from flask import Flask, jsonify, render_template_string
 import threading
@@ -22,18 +22,34 @@ from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv 
 load_dotenv() 
 
-# --- Global Configuration ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-EXCHANGE_ID = os.getenv("EXCHANGE_ID", "fxcm") # Defaulting to FXCM
-FOREX_PAIRS = os.getenv("FOREX_PAIRS", "EUR/USD,USD/JPY,GBP/USD,AUD/USD,USD/CAD").split(',') 
-SYMBOLS = [s.strip() for s in FOREX_PAIRS] 
-TIMEFRAME = os.getenv("TIMEFRAME", "4h")
-DAILY_TIMEFRAME = '1d' 
 
-# Global objects initialized later
+# --- KUCOIN PROXY CONFIGURATION ---
+EXCHANGE_ID = "kucoin" 
+# Mapped Forex pairs to KuCoin's stablecoin crypto pairs (proxies for EUR/USD, GBP/USD, etc.)
+SYMBOLS = os.getenv("FOREX_PROXIES", "EUR/USDT,BTC/USDT,ETH/USDT,XRP/USDT,SOL/USDT").split(',') 
+TIMEFRAME = os.getenv("TIMEFRAME", "4h")
+DAILY_TIMEFRAME = '1d'
+
+# Initialize Bot and Exchange (Using KuCoin public access - No keys needed for market data)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-exchange = None 
+
+exchange_config = {
+    'enableRateLimit': True,
+    'rateLimit': 1000, 
+    # NO API KEY OR SECRET REQUIRED
+}
+
+try:
+    exchange = getattr(ccxt, EXCHANGE_ID)(exchange_config)
+    exchange.load_markets() 
+    print(f"✅ {EXCHANGE_ID.upper()} markets loaded successfully (Proxy mode).")
+except Exception as e:
+    print(f"❌ CRITICAL: Failed to initialize exchange: {e}")
+    exit(1)
+
+# Global ML Model and Scaler 
 ML_MODEL = None
 SCALER = None
 
@@ -44,20 +60,19 @@ bot_stats = {
     "last_analysis": None,
     "monitored_assets": SYMBOLS,
     "uptime_start": datetime.now().isoformat(),
-    "exchange": EXCHANGE_ID.upper()
+    "exchange": EXCHANGE_ID.upper() + " (PROXY)"
 }
 
 
 # =========================================================================
 # === SECTION 1: ALL FUNCTION DEFINITIONS (CRITICALLY IMPORTANT PLACEMENT) ===
 # =========================================================================
-# ALL functions are defined FIRST to eliminate the NameError.
+# Note: Functions are simplified for proxy data and structured exactly as the working model.
 
 def train_prediction_model(df):
     """Trains a Logistic Regression model and returns the model and scaler."""
     global SCALER
     if len(df) < 500: return None, None
-    # ... (Feature engineering and model training logic remains the same) ...
     df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
     df['fast_over_slow'] = np.where(df['fast_sma'] > df['slow_sma'], 1, 0)
     df['close_over_fast'] = np.where(df['close'] > df['fast_sma'], 1, 0)
@@ -82,20 +97,19 @@ def calculate_cpr_levels(df_daily):
 
 def fetch_and_prepare_data(symbol, timeframe, daily_timeframe='1d', limit=500):
     """Fetches main chart data, prepares for analysis."""
-    global exchange 
-    if exchange is None: raise Exception("Exchange not initialized.") 
     
+    # KuCoin specific fix: use the symbol ID from markets, just like the working code.
     try:
-        fx_symbol_id = exchange.markets[symbol]['id']
+        kucoin_symbol_id = exchange.markets[symbol]['id']
     except KeyError:
-        print(f"Error: Symbol {symbol} not found in exchange market list.")
+        print(f"Error: Symbol {symbol} not found in KuCoin market list. Check symbols.")
         return pd.DataFrame(), None
 
-    ohlcv = exchange.fetch_ohlcv(fx_symbol_id, timeframe, limit=limit); df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True); df = df.dropna()
+    ohlcv = exchange.fetch_ohlcv(kucoin_symbol_id, timeframe, limit=limit); df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True); df = df.dropna()
     df['fast_sma'] = df['close'].rolling(window=9).mean(); df['slow_sma'] = df['close'].rolling(window=20).mean(); df = df.dropna() 
     if len(df) < 20: return pd.DataFrame(), None
     
-    ohlcv_daily = exchange.fetch_ohlcv(fx_symbol_id, daily_timeframe, limit=20) 
+    ohlcv_daily = exchange.fetch_ohlcv(kucoin_symbol_id, daily_timeframe, limit=20) 
     df_daily = pd.DataFrame(ohlcv_daily, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df_daily.set_index('timestamp', inplace=True)
     cpr_levels = calculate_cpr_levels(df_daily)
     return df, cpr_levels
@@ -130,24 +144,25 @@ def get_trend_and_signal(df, cpr_levels):
     elif fast_sma < slow_sma: trend = "Downtrend"; trend_emoji = "🔴"
 
     pp = cpr_levels.get('PP', 'N/A'); proximity_msg = ""; 
+    price_format = ".4f" 
     if pp != 'N/A':
         distance_to_pp = current_price - pp
-        if abs(distance_to_pp / pp) < 0.0005: proximity_msg = "Price is near the <b>Central Pivot Point (PP)</b>."
-        elif distance_to_pp > 0: proximity_msg = f"Price is <b>Above PP</b> ({pp:.5f})."
-        else: proximity_msg = f"Price is <b>Below PP</b> ({pp:.5f})."
+        if abs(distance_to_pp / pp) < 0.005: proximity_msg = "Price is near the <b>Central Pivot Point (PP)</b>."
+        elif distance_to_pp > 0: proximity_msg = f"Price is <b>Above PP</b> ({pp:{price_format}})."
+        else: proximity_msg = f"Price is <b>Below PP</b> ({pp:{price_format}})."
             
     signal = "HOLD"; signal_emoji = "🟡"
     if "BULLISH" in ml_prediction and current_price > pp: signal = "STRONG BUY"; signal_emoji = "🚀"
     elif "BEARISH" in ml_prediction and current_price < pp: signal = "STRONG SELL"; signal_emoji = "🔻"
         
-    return trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction, "N/A" # Returning N/A for confidence for simplicity here
+    return trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction, "N/A" 
 
 
 def generate_and_send_signal(symbol):
     """The main job executed by the scheduler."""
     
     try:
-        # Use a new asyncio loop manager for the telegram call within the synchronous thread
+        # Uses a nested function to handle the async call from the sync scheduler thread
         async def send_message_async(text, parse_mode):
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=parse_mode)
 
@@ -159,18 +174,18 @@ def generate_and_send_signal(symbol):
             return
 
         trend, trend_emoji, proximity_msg, signal, signal_emoji, ml_prediction, ml_confidence = get_trend_and_signal(df, cpr_levels)
-        current_price = df.iloc[-1]['close']; price_format = ".5f" if current_price < 10 else ".4f"
+        current_price = df.iloc[-1]['close']; price_format = ".4f"
         
         cpr_text = (f"<b>Daily CPR Levels:</b>\n" f"  - <b>PP (Pivot Point):</b> <code>{cpr_levels['PP']:{price_format}}</code>\n" f"  - <b>R1/S1:</b> <code>{cpr_levels['R1']:{price_format}}</code> / <code>{cpr_levels['S1']:{price_format}}</code>\n" f"  - <b>R2/S2:</b> <code>{cpr_levels['R2']:{price_format}}</code> / <code>{cpr_levels['S2']:{price_format}}</code>\n")
         
         message = (
-            f"╔════════════════════════════════╗\n" f"  🧠 <b>FOREX AI INTELLIGENCE REPORT</b>\n" f"╚════════════════════════════════╝\n\n"
-            f"<b>{symbol}</b> | {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"╔════════════════════════════════╗\n" f"  🧠 <b>FOREX PROXY INTELLIGENCE REPORT</b>\n" f"╚════════════════════════════════╝\n\n"
+            f"<b>{symbol}</b> (KuCoin Proxy) | {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
             f"---🚨 <b>{signal_emoji} FINAL SIGNAL: {signal}</b> 🚨---\n\n"
             f"<b>💰 Current Price:</b> <code>{current_price:{price_format}}</code>\n" f"<b>⏰ Timeframe:</b> {TIMEFRAME}\n"
             f"\n\n<b>🤖 ML PREDICTION</b>\n" f"<b>Forecast:</b> {ml_prediction}\n" f"<b>Confidence:</b> N/A\n"
             f"\n\n<b>📊 TECHNICAL &amp; KEY LEVELS</b>\n" f"{trend_emoji} <b>Trend (SMA 9/20):</b> {trend}\n" f"{proximity_msg}\n\n"
-            f"{cpr_text}\n" f"----------------------------------------\n" f"<i>Exchange: {EXCHANGE_ID.upper()} | Disclaimer: This analysis is for educational purposes only.</i>")
+            f"{cpr_text}\n" f"----------------------------------------\n" f"<i>Exchange: {EXCHANGE_ID.upper()} Public | Disclaimer: Using crypto proxy data.</i>")
 
         message = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'); message = message.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>'); message = message.replace('&lt;code&gt;', '<code>').replace('&lt;/code&gt;', '</code>'); message = message.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
         
@@ -185,31 +200,19 @@ def generate_and_send_signal(symbol):
         bot_stats['status'] = f"Fatal Error in Analysis: {str(e)[:40]}..."
         print(f"❌ Error generating signal for {symbol}: {e}")
         
-        diagnostic_message = (f"❌ <b>FATAL FOREX ANALYSIS ERROR for {symbol}</b> ❌\n\n" f"<b>Time:</b> {datetime.now().strftime('%H:%M:%S UTC')}\n" f"<b>Issue:</b> The calculation failed.\n\n" f"<b>Source Trace:</b>\n<code>{str(e)[:150]}</code>")
+        diagnostic_message = (f"❌ <b>FATAL PROXY ANALYSIS ERROR for {symbol}</b> ❌\n\n" f"<b>Time:</b> {datetime.now().strftime('%H:%M:%S UTC')}\n" f"<b>Issue:</b> The calculation failed.\n\n" f"<b>Source Trace:</b>\n<code>{str(e)[:150]}</code>")
         asyncio.run(send_message_async(diagnostic_message, 'HTML'))
 
 
-def initialize_exchange_and_ml():
-    """Initializes the exchange, loads markets, and trains the ML model."""
-    global exchange, ML_MODEL, SCALER
-
-    # 1. Exchange Initialization (Immediate and Blocking)
-    exchange_config = {
-        'enableRateLimit': True, 'rateLimit': 1000, 
-        'apiKey': os.getenv("FX_API_KEY"), 'secret': os.getenv("FX_SECRET"),
-    }
+def start_scheduler_thread():
+    """Starts the BackgroundScheduler in a separate thread."""
     
-    try:
-        exchange = getattr(ccxt, EXCHANGE_ID)(exchange_config)
-        exchange.load_markets() 
-        print(f"✅ {EXCHANGE_ID.upper()} markets loaded successfully.")
-    except Exception as e:
-        print(f"❌ CRITICAL: Failed to initialize exchange: {e}")
-        raise # Raise the error to crash Gunicorn if init fails
+    # 1. Initialize ML model synchronously
+    global ML_MODEL, SCALER
 
-    # 2. ML Training (Immediate and Blocking)
     print("\n⏳ Preparing and training Machine Learning Model...")
     try:
+        # Use the first proxy symbol for training
         ohlcv_train = exchange.fetch_ohlcv(SYMBOLS[0].strip(), TIMEFRAME, limit=600)
         df_train = pd.DataFrame(ohlcv_train, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df_train['close'] = pd.to_numeric(df_train['close'])
         df_train['fast_sma'] = df_train['close'].rolling(window=9).mean(); df_train['slow_sma'] = df_train['close'].rolling(window=20).mean(); df_train = df_train.dropna()
@@ -218,12 +221,6 @@ def initialize_exchange_and_ml():
         print(f"❌ ML Model Training Failed: {e}. Continuing without ML.")
         ML_MODEL = None; SCALER = None
 
-
-def start_scheduler_thread():
-    """Starts the BackgroundScheduler in a separate thread."""
-    
-    # 1. Initialize all complex components synchronously
-    initialize_exchange_and_ml()
 
     # 2. Start the Scheduler (BackgroundScheduler manages its own threads)
     scheduler = BackgroundScheduler() 
@@ -255,7 +252,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return render_template_string("<h1>Forex Bot Status Page</h1>" + 
+    return render_template_string("<h1>Forex Proxy Bot Status Page</h1>" + 
                                  f"<p>Status: {bot_stats['status']}</p>" + 
                                  f"<p>Analyses: {bot_stats['total_analyses']}</p>" +
                                  f"<p>Exchange: {bot_stats['exchange']}</p>" +
@@ -271,8 +268,6 @@ def status():
 
 
 # 2. CRITICAL STARTUP CODE (Thread Start - The last lines of execution)
-
-# This thread starts immediately when Gunicorn loads the 'app' instance
 try:
     scheduler_thread = threading.Thread(target=start_scheduler_thread, daemon=True)
     scheduler_thread.start()
