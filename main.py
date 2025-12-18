@@ -447,7 +447,7 @@ async def generate_and_send_signal(pair):
             f"{pivot_text}\n"
             
             f"----------------------------------------\n"
-            f"<i>⚠️ Educational purposes only. Trade at your own risk.</i>"
+            f"<i></i>"
         )
 
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
@@ -525,3 +525,4 @@ scheduler_thread = threading.Thread(target=start_asyncio_thread, daemon=True)
 scheduler_thread.start()
 
 print(f"✅ Forex AI Bot initialized with Flask + Scheduler using {EXCHANGE_NAME.upper()}")
+
