@@ -23,7 +23,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-FOREX_PAIRS = [p.strip() for p in os.getenv("FOREX_PAIRS", "EUR/USD,GBP/USD,USD/JPY").split(',')]
+FOREX_PAIRS = [p.strip() for p in os.getenv("FOREX_PAIRS", "EUR/USD,GBP/USD,USD/JPY,AUD/USD").split(',')]
 TIMEFRAME_MAIN = "4h"  # Major Trend
 TIMEFRAME_ENTRY = "1h" # Entry Precision
 
@@ -41,7 +41,7 @@ bot_stats = {
     "last_analysis": None,
     "monitored_assets": FOREX_PAIRS,
     "uptime_start": datetime.now().isoformat(),
-    "version": "V2.5 Forex Elite Quant"
+    "version": "V2.5 Forex Elite"
 }
 
 # =========================================================================
@@ -130,7 +130,7 @@ def generate_and_send_signal(symbol):
         # --- PREMIUM SIGNAL TEMPLATE ---
         message = (
             f"╔════════════════════════════════╗\n"
-            f"  🌍 <b>PREMIER FOREX AI QUANT</b>\n"
+            f"  🌍 <b>PREMIER FOREX AI BOT</b>\n"
             f"╚════════════════════════════════╝\n\n"
             f"<b>Pair:</b> {symbol}\n"
             f"<b>Rate:</b> <code>{price:.{decimals}f}</code>\n\n"
@@ -144,7 +144,7 @@ def generate_and_send_signal(symbol):
             f"🔥 <b>Take Profit 2:</b> <code>{tp2:.{decimals}f}</code>\n"
             f"🛑 <b>Stop Loss:</b> <code>{sl:.{decimals}f}</code>\n\n"
             f"----------------------------------------\n"
-            f"<i>Verified AI Forex Analysis V2.5 Elite</i>"
+            f"<i>Verified AI Forex Analysis V2.5 </i>"
         )
 
         asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML'))
@@ -196,3 +196,4 @@ def health(): return jsonify({"status": "healthy"}), 200
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
